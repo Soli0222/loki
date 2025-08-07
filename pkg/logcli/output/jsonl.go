@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"os"
 	"time"
 
 	"github.com/grafana/loki/v3/pkg/loghttp"
@@ -30,7 +30,8 @@ func (o *JSONLOutput) FormatAndPrintln(ts time.Time, lbls loghttp.LabelSet, _ in
 
 	out, err := json.Marshal(entry)
 	if err != nil {
-		log.Fatalf("error marshalling entry: %s", err)
+		fmt.Fprintf(os.Stderr, "error marshalling entry: %s\n", err)
+		return
 	}
 
 	fmt.Fprintln(o.w, string(out))

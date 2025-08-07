@@ -34,9 +34,9 @@ func (o *DefaultOutput) FormatAndPrintln(ts time.Time, lbls loghttp.LabelSet, ma
 	if o.options.ColoredOutput {
 		labelsColor := getColor(lbls.String()).SprintFunc()
 		fmt.Fprintf(o.w, "%s %s %s\n", color.BlueString(timestamp), labelsColor(padLabel(lbls, maxLabelsLen)), line)
-	} else {
-		fmt.Fprintf(o.w, "%s %s %s\n", color.BlueString(timestamp), color.RedString(padLabel(lbls, maxLabelsLen)), line)
+		return
 	}
+	fmt.Fprintf(o.w, "%s %s %s\n", color.BlueString(timestamp), color.RedString(padLabel(lbls, maxLabelsLen)), line)
 }
 
 // WithWriter returns a copy of the LogOutput with the writer set to the given writer

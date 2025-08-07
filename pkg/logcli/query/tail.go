@@ -2,11 +2,9 @@ package query
 
 import (
 	"context"
+	"fmt"
 	"log"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/fatih/color"
@@ -21,20 +19,24 @@ import (
 )
 
 // TailQuery connects to the Loki websocket endpoint and tails logs
-func (q *Query) TailQuery(delayFor time.Duration, c client.Client, out output.LogOutput) {
+func (q *Query) TailQuery(delayFor time.Duration, c client.Client, out output.LogOutput) error {
+	// Backward-compatible wrapper without cancellation.
+	return q.TailQueryWithContext(context.Background(), delayFor, c, out)
+}
+
+// TailQueryWithContext tails logs and supports graceful cancellation via ctx.
+func (q *Query) TailQueryWithContext(ctx context.Context, delayFor time.Duration, c client.Client, out output.LogOutput) error {
 	conn, err := c.LiveTailQueryConn(q.QueryString, delayFor, q.Limit, q.Start, q.Quiet)
 	if err != nil {
-		log.Fatalf("Tailing logs failed: %+v", err)
+		return fmt.Errorf("tailing logs failed: %w", err)
 	}
 
+	// Close the connection when context is canceled.
 	go func() {
-		stopChan := make(chan os.Signal, 1)
-		signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
-		<-stopChan
-		if err := conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")); err != nil {
-			log.Println("Error closing websocket:", err)
-		}
-		os.Exit(0)
+		<-ctx.Done()
+		// Attempt graceful close; ignore errors as we're already stopping.
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		_ = conn.Close()
 	}()
 
 	if len(q.IgnoreLabelsKey) > 0 && !q.Quiet {
@@ -51,6 +53,11 @@ func (q *Query) TailQuery(delayFor time.Duration, c client.Client, out output.Lo
 		tailResponse := new(loghttp.TailResponse)
 		err := unmarshal.ReadTailResponseJSON(tailResponse, conn)
 		if err != nil {
+			// If context was canceled, treat as graceful termination.
+			if ctx.Err() != nil {
+				return nil
+			}
+
 			// Check if the websocket connection closed unexpectedly. If so, retry.
 			// The connection might close unexpectedly if the querier handling the tail request
 			// in Loki stops running. The following error would be printed:
@@ -58,10 +65,8 @@ func (q *Query) TailQuery(delayFor time.Duration, c client.Client, out output.Lo
 			if websocket.IsCloseError(err, websocket.CloseAbnormalClosure) {
 				log.Printf("Remote websocket connection closed unexpectedly (%+v). Connecting again.", err)
 
-				// Close previous connection. If it fails to close the connection it should be fine as it is already broken.
-				if err = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")); err != nil {
-					log.Printf("Error closing websocket: %+v", err)
-				}
+				// Ensure previous broken connection is closed.
+				_ = conn.Close()
 
 				// Try to re-establish the connection up to 5 times.
 				backoff := backoff.New(context.Background(), backoff.Config{
@@ -71,6 +76,10 @@ func (q *Query) TailQuery(delayFor time.Duration, c client.Client, out output.Lo
 				})
 
 				for backoff.Ongoing() {
+					// If ctx is canceled while backing off, stop.
+					if ctx.Err() != nil {
+						return nil
+					}
 					conn, err = c.LiveTailQueryConn(q.QueryString, delayFor, q.Limit, lastReceivedTimestamp, q.Quiet)
 					if err == nil {
 						break
@@ -82,14 +91,19 @@ func (q *Query) TailQuery(delayFor time.Duration, c client.Client, out output.Lo
 
 				if err = backoff.Err(); err != nil {
 					log.Println("Error recreating tailing connection:", err)
-					return
+					return fmt.Errorf("error recreating tailing connection: %w", err)
 				}
 
 				continue
 			}
 
+			// Treat normal closure as graceful termination
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				return nil
+			}
+
 			log.Println("Error reading stream:", err)
-			return
+			return fmt.Errorf("error reading stream: %w", err)
 		}
 
 		labels := loghttp.LabelSet{}

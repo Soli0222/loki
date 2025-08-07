@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"net/url"
 	"os"
+	"os/signal"
 	"runtime/pprof"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/alecthomas/kingpin/v2"
@@ -446,13 +449,28 @@ func main() {
 		}
 
 		if *tail || *follow {
-			rangeQuery.TailQuery(time.Duration(*delayFor)*time.Second, queryClient, out)
+			// Create cancellable context and wire OS signals
+			ctx, cancel := context.WithCancel(context.Background())
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+			go func() {
+				<-sigCh
+				cancel()
+			}()
+
+			if err := rangeQuery.TailQueryWithContext(ctx, time.Duration(*delayFor)*time.Second, queryClient, out); err != nil {
+				log.Fatalf("Error tailing logs: %s", err)
+			}
 		} else if rangeQuery.ParallelMaxWorkers == 1 {
-			rangeQuery.DoQuery(queryClient, out, *statistics)
+			if err := rangeQuery.DoQuery(queryClient, out, *statistics); err != nil {
+				log.Fatalf("Error executing query: %s", err)
+			}
 		} else {
 			// `--limit` doesn't make sense when using parallelism.
 			rangeQuery.Limit = 0
-			rangeQuery.DoQueryParallel(queryClient, out, *statistics)
+			if err := rangeQuery.DoQueryParallel(queryClient, out, *statistics); err != nil {
+				log.Fatalf("Error executing parallel query: %s", err)
+			}
 		}
 	case instantQueryCmd.FullCommand():
 		location, err := time.LoadLocation(*timezone)
@@ -471,17 +489,25 @@ func main() {
 			log.Fatalf("Unable to create log output: %s", err)
 		}
 
-		instantQuery.DoQuery(queryClient, out, *statistics)
+		if err := instantQuery.DoQuery(queryClient, out, *statistics); err != nil {
+			log.Fatalf("Error executing instant query: %s", err)
+		}
 	case labelsCmd.FullCommand():
-		labelsQuery.DoLabels(queryClient)
+		if err := labelsQuery.DoLabels(queryClient); err != nil {
+			log.Fatalf("Error querying labels: %s", err)
+		}
 	case seriesCmd.FullCommand():
-		seriesQuery.DoSeries(queryClient)
+		if err := seriesQuery.DoSeries(queryClient); err != nil {
+			log.Fatalf("Error querying series: %s", err)
+		}
 	case fmtCmd.FullCommand():
 		if err := formatLogQL(os.Stdin, os.Stdout); err != nil {
 			log.Fatalf("unable to format logql: %s", err)
 		}
 	case statsCmd.FullCommand():
-		statsQuery.DoStats(queryClient)
+		if err := statsQuery.DoStats(queryClient); err != nil {
+			log.Fatalf("Error querying stats: %s", err)
+		}
 	case volumeCmd.FullCommand(), volumeRangeCmd.FullCommand():
 		location, err := time.LoadLocation(*timezone)
 		if err != nil {
@@ -500,12 +526,18 @@ func main() {
 		}
 
 		if cmd == volumeRangeCmd.FullCommand() {
-			index.GetVolumeRange(volumeRangeQuery, queryClient, out, *statistics)
+			if err := index.GetVolumeRange(volumeRangeQuery, queryClient, out, *statistics); err != nil {
+				log.Fatalf("Error querying volume range: %s", err)
+			}
 		} else {
-			index.GetVolume(volumeQuery, queryClient, out, *statistics)
+			if err := index.GetVolume(volumeQuery, queryClient, out, *statistics); err != nil {
+				log.Fatalf("Error querying volume: %s", err)
+			}
 		}
 	case detectedFieldsCmd.FullCommand():
-		detectedFieldsQuery.Do(queryClient, *outputMode)
+		if err := detectedFieldsQuery.Do(queryClient, *outputMode); err != nil {
+			log.Fatalf("Error querying detected fields: %s", err)
+		}
 	case deleteCreateCmd.FullCommand():
 		if err := deleteCreateQuery.CreateQuery(queryClient); err != nil {
 			log.Fatalf("Error creating delete request: %s", err)
